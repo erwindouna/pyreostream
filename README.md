@@ -22,29 +22,32 @@ publish its motion state to MQTT — without transcoding.
 
 pyreostream is an async Python bridge for Reolink cameras, focused on:
 
-- Speaking the Reolink Baichuan protocol to pull encoded video frames and motion
-  state (a Python port of what [Neolink](https://github.com/QuantumEntangledAndy/neolink)
-  does in Rust)
-- Serving those frames over RTSP/RTP without re-encoding, via GStreamer's `appsrc`
-- Publishing motion on/off events to MQTT, gated so the RTSP stream only runs
+- Logging in and tracking live motion state via
+  [reolink-aio](https://github.com/starkillerOG/reolink_aio) (the same library
+  behind Home Assistant's Reolink integration), rather than reimplementing the
+  Baichuan wire protocol
+- Relaying the camera's own RTSP stream through a local RTSP mount without
+  re-encoding, via GStreamer's `appsrc`
+- Publishing motion on/off events to MQTT, gated so the RTSP relay only runs
   while motion is active
 
-The library is under active development. The Baichuan protocol client and the
-GStreamer RTSP server are currently stubs — see [Architecture](#architecture)
-for what's implemented versus planned.
+The library is under active development. The GStreamer RTSP relay is currently
+a stub — see [Architecture](#architecture) for what's implemented versus planned.
 
 ## Architecture
 
 This is built in layers, each independently testable:
 
-1. **Reolink protocol client** (`pyreostream.client.ReolinkClient`) — connects
-   to the camera and speaks Baichuan to fetch motion state and encoded frames.
-2. **Frame extraction** — `ReolinkClient.video_frames()` yields already-encoded
-   H.264/H.265 frames; this project never encodes video itself.
-3. **RTSP/RTP server** (`pyreostream.rtsp.RtspServer`) — packetizes those frames
-   for RTSP clients using GStreamer, started/stopped on demand.
-4. **MQTT motion publisher** (`pyreostream.mqtt.MotionPublisher`) — publishes
-   retained motion on/off events.
+1. **Reolink protocol client** (`pyreostream.client.ReolinkClient`) — a thin
+   adapter over `reolink_aio.api.Host` that logs in, keeps a Baichuan push
+   subscription open for live motion updates, and resolves the camera's
+   native RTSP stream URL.
+2. **RTSP/RTP relay** (`pyreostream.rtsp.RtspServer`) — pulls the camera's own
+   RTSP stream as a client and re-packetizes it for RTSP clients using
+   GStreamer, started/stopped on demand; this project never encodes or
+   decodes video itself.
+3. **MQTT publisher** (`pyreostream.mqtt.MQTTPublisher`) — publishes retained
+   messages, e.g. motion on/off events.
 
 ## Installation
 
@@ -60,22 +63,21 @@ Serving RTSP requires GStreamer with the `rtsp-server`, `app`, and
 ~~~python
 import asyncio
 
-from pyreostream import MotionPublisher, ReolinkClient, RtspServer
+from pyreostream import MQTTPublisher, ReolinkClient, RtspServer
 
 
 async def main() -> None:
     async with ReolinkClient("192.168.2.10", username="admin", password="password") as camera:
         rtsp = RtspServer()
-        motion_publisher = MotionPublisher("192.168.2.53")
+        mqtt_publisher = MQTTPublisher("192.168.2.53")
 
         rtsp_task: asyncio.Task[None] | None = None
 
-        while True:
-            motion = await camera.get_motion()
-            motion_publisher.publish(motion=motion)
+        async for motion in camera.motion_changes():
+            mqtt_publisher.publish("reolink/motion", "ON" if motion else "OFF")
 
-            if motion and rtsp_task is None:
-                rtsp_task = asyncio.create_task(rtsp.start(camera.video_frames()))
+            if motion and rtsp_task is None and (url := await camera.rtsp_url()) is not None:
+                rtsp_task = asyncio.create_task(rtsp.start(url))
 
             if not motion and rtsp_task is not None:
                 await rtsp.stop()

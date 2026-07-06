@@ -1,28 +1,25 @@
-"""MQTT motion-state publisher."""
-
-import logging
+"""MQTT publisher."""
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 
 from .const import DEFAULT_MQTT_PORT
 
-_LOGGER = logging.getLogger(__name__)
 
+class MQTTPublisher:
+    """Publish states to MQTT."""
 
-class MotionPublisher:
-    """Publish camera motion state to MQTT."""
-
-    def __init__(self, host: str, *, port: int = DEFAULT_MQTT_PORT, topic: str = "reolink/motion") -> None:
+    def __init__(self, host: str, username: str | None = None, password: str | None = None, *, port: int = DEFAULT_MQTT_PORT) -> None:
         """Connect to the MQTT broker and start its network loop in the background."""
-        self._topic = topic
         self._client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2)
+        if username and password:
+            self._client.username_pw_set(username, password)
         self._client.connect(host, port)
         self._client.loop_start()
 
-    def publish(self, *, motion: bool) -> None:
-        """Publish the current motion state as a retained MQTT message."""
-        self._client.publish(self._topic, "ON" if motion else "OFF", retain=True)
+    def publish(self, topic: str, payload: str, *, retain: bool = True) -> None:
+        """Publish a message to the given topic."""
+        self._client.publish(topic, payload, retain=retain)
 
     def close(self) -> None:
         """Disconnect from the MQTT broker."""

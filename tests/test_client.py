@@ -1,101 +1,149 @@
 """Tests for pyreostream.client.ReolinkClient."""
 
-import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import Generator
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from reolink_aio.exceptions import (
+    ApiError,
+    CredentialsInvalidError,
+    LoginError,
+    ReolinkConnectionError,
+    ReolinkTimeoutError,
+)
 
 from pyreostream.client import ReolinkClient
-from pyreostream.exceptions import PyReoStreamConnectionError, PyReoStreamTimeoutError
+from pyreostream.exceptions import (
+    PyReoStreamAuthenticationError,
+    PyReoStreamConnectionError,
+    PyReoStreamTimeoutError,
+)
 
 
-@pytest.fixture(name="fake_server")
-async def fake_server_fixture() -> AsyncGenerator[asyncio.Server, None]:
-    """Start a bare TCP server standing in for a Reolink camera."""
+@pytest.fixture(name="mock_host")
+def mock_host_fixture() -> Generator[MagicMock]:
+    """Provide a stand-in for reolink_aio.api.Host, patched into pyreostream.client."""
+    with patch("pyreostream.client.Host") as mock_host_cls:
+        mock_host = mock_host_cls.return_value
+        mock_host.host = "192.168.2.10"
+        mock_host.login = AsyncMock()
+        mock_host.logout = AsyncMock()
+        mock_host.get_rtsp_stream_source = AsyncMock(return_value="rtsp://192.168.2.10/h264Preview_01_main")
+        mock_host.motion_detected = MagicMock(return_value=False)
+        mock_host.baichuan = MagicMock()
+        mock_host.baichuan.subscribe_events = AsyncMock()
+        mock_host.baichuan.unsubscribe_events = AsyncMock()
+        yield mock_host
 
-    async def _handle(_reader: asyncio.StreamReader, _writer: asyncio.StreamWriter) -> None:
-        pass
 
-    server = await asyncio.start_server(_handle, "127.0.0.1", 0)
-    async with server:
-        yield server
+async def test_connect_logs_in_and_subscribes(mock_host: MagicMock) -> None:
+    """connect() logs in, opens a Baichuan push subscription, and registers a motion callback."""
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
+
+    await client.connect()
+
+    mock_host.login.assert_awaited_once()
+    mock_host.baichuan.subscribe_events.assert_awaited_once()
+    mock_host.baichuan.register_callback.assert_called_once()
+    kwargs = mock_host.baichuan.register_callback.call_args.kwargs
+    assert kwargs["cmd_id"] == 33
+    assert kwargs["channel"] == 0
+    assert client.connected
 
 
-def _server_port(server: asyncio.Server) -> int:
-    port: int = server.sockets[0].getsockname()[1]
-    return port
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        (CredentialsInvalidError("bad password"), PyReoStreamAuthenticationError),
+        (LoginError("login failed"), PyReoStreamAuthenticationError),
+        (ApiError("api error"), PyReoStreamAuthenticationError),
+        (ReolinkTimeoutError("timed out"), PyReoStreamTimeoutError),
+        (ReolinkConnectionError("refused"), PyReoStreamConnectionError),
+    ],
+)
+async def test_connect_wraps_reolink_aio_errors(mock_host: MagicMock, raised: Exception, expected: type[Exception]) -> None:
+    """connect() maps reolink-aio's exceptions onto pyreostream's own exception types."""
+    mock_host.login.side_effect = raised
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
 
-
-async def test_connect_reaches_authentication_stub(fake_server: asyncio.Server) -> None:
-    """connect() opens the TCP socket then hits the (unimplemented) auth handshake."""
-    client = ReolinkClient("127.0.0.1", username="user", password="pass", port=_server_port(fake_server))
-
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(expected):
         await client.connect()
 
     assert not client.connected
 
 
-async def test_connect_connection_refused() -> None:
-    """connect() wraps a refused connection in PyReoStreamConnectionError."""
-    client = ReolinkClient("127.0.0.1", username="user", password="pass", port=1)
+async def test_get_motion_reads_from_host(mock_host: MagicMock) -> None:
+    """get_motion() reflects the host's push-updated motion state."""
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
+    await client.connect()
 
-    with pytest.raises(PyReoStreamConnectionError):
-        await client.connect()
+    mock_host.motion_detected.return_value = True
+    assert await client.get_motion() is True
 
-
-async def test_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """connect() wraps a connection timeout in PyReoStreamTimeoutError."""
-
-    async def _hang(*_args: object, **_kwargs: object) -> None:
-        await asyncio.sleep(3600)
-
-    monkeypatch.setattr(asyncio, "open_connection", _hang)
-    client = ReolinkClient("127.0.0.1", username="user", password="pass", request_timeout=0.01)
-
-    with pytest.raises(PyReoStreamTimeoutError):
-        await client.connect()
+    mock_host.motion_detected.return_value = False
+    assert await client.get_motion() is False
 
 
-async def test_get_motion_not_implemented() -> None:
-    """get_motion() raises NotImplementedError until Baichuan support lands."""
-    client = ReolinkClient("127.0.0.1", username="user", password="pass")
+async def test_motion_changes_yields_pushed_state(mock_host: MagicMock) -> None:
+    """motion_changes() yields whatever the Baichuan push callback queues."""
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
+    await client.connect()
 
-    with pytest.raises(NotImplementedError):
-        await client.get_motion()
+    mock_host.motion_detected.return_value = True
+    on_motion_push = mock_host.baichuan.register_callback.call_args.args[1]
+    on_motion_push()
 
-
-async def test_read_frame_not_implemented() -> None:
-    """read_frame() raises NotImplementedError until Baichuan support lands."""
-    client = ReolinkClient("127.0.0.1", username="user", password="pass")
-
-    with pytest.raises(NotImplementedError):
-        await client.read_frame()
+    changes = client.motion_changes()
+    assert await changes.__anext__() is True
 
 
-async def test_video_frames_yields_nothing_when_not_connected() -> None:
-    """video_frames() yields nothing once the client is disconnected."""
-    client = ReolinkClient("127.0.0.1", username="user", password="pass")
+async def test_rtsp_url_delegates_to_host(mock_host: MagicMock) -> None:
+    """rtsp_url() resolves the camera's native RTSP stream via the host."""
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
 
-    frames = [frame async for frame in client.video_frames()]
+    url = await client.rtsp_url(stream="main")
 
-    assert frames == []
+    mock_host.get_rtsp_stream_source.assert_awaited_once_with(0, stream="main")
+    assert url == "rtsp://192.168.2.10/h264Preview_01_main"
 
 
-async def test_close_when_never_connected() -> None:
-    """close() is a no-op when the client never connected."""
-    client = ReolinkClient("127.0.0.1", username="user", password="pass")
+async def test_close_unsubscribes_and_logs_out(mock_host: MagicMock) -> None:
+    """close() unregisters the motion callback, unsubscribes, and logs out."""
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
+    await client.connect()
 
     await client.close()
 
+    mock_host.baichuan.unregister_callback.assert_called_once()
+    mock_host.baichuan.unsubscribe_events.assert_awaited_once()
+    mock_host.logout.assert_awaited_once()
     assert not client.connected
 
 
-async def test_context_manager_closes_on_failed_connect(fake_server: asyncio.Server) -> None:
-    """The async context manager leaves the client disconnected if connect() fails."""
-    client = ReolinkClient("127.0.0.1", username="user", password="pass", port=_server_port(fake_server))
+async def test_close_when_never_connected_is_noop(mock_host: MagicMock) -> None:
+    """close() is a no-op when connect() was never called."""
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
 
-    with pytest.raises(NotImplementedError):
+    await client.close()
+
+    mock_host.logout.assert_not_called()
+    assert not client.connected
+
+
+async def test_context_manager_connects_and_closes(mock_host: MagicMock) -> None:
+    """The async context manager connects on enter and closes on exit."""
+    async with ReolinkClient("192.168.2.10", username="user", password="pass") as client:
+        assert client.connected
+
+    mock_host.logout.assert_awaited_once()
+
+
+async def test_context_manager_leaves_disconnected_on_failed_connect(mock_host: MagicMock) -> None:
+    """The async context manager leaves the client disconnected if connect() fails."""
+    mock_host.login.side_effect = ReolinkConnectionError("refused")
+    client = ReolinkClient("192.168.2.10", username="user", password="pass")
+
+    with pytest.raises(PyReoStreamConnectionError):
         async with client:
             pass
 

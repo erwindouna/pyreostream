@@ -23,17 +23,38 @@ async def test_send_rtp_packet_not_implemented() -> None:
         await server.send_rtp_packet(b"frame")
 
 
+async def test_relay_frames_not_implemented() -> None:
+    """_relay_frames() raises NotImplementedError until the GStreamer pull lands."""
+    server = RtspServer()
+    server.enabled = True
+
+    with pytest.raises(NotImplementedError):
+        async for _ in server._relay_frames("rtsp://camera/h264Preview_01_main"):
+            pass
+
+
+async def test_relay_frames_yields_nothing_when_disabled() -> None:
+    """_relay_frames() yields nothing once the server is disabled."""
+    server = RtspServer()
+
+    frames = [frame async for frame in server._relay_frames("rtsp://camera/h264Preview_01_main")]
+
+    assert frames == []
+
+
 async def test_start_forwards_frames_until_stopped() -> None:
-    """start() forwards each frame from the source and stops once disabled."""
+    """start() forwards each relayed frame and stops once disabled."""
     server = RtspServer()
     server.send_rtp_packet = AsyncMock()  # type: ignore[method-assign]
 
-    async def source() -> AsyncIterator[bytes]:
+    async def fake_relay_frames(_rtsp_url: str) -> AsyncIterator[bytes]:
         yield b"frame-1"
         await server.stop()
         yield b"frame-2"
 
-    await server.start(source())
+    server._relay_frames = fake_relay_frames  # type: ignore[method-assign,assignment]
+
+    await server.start("rtsp://camera/h264Preview_01_main")
 
     server.send_rtp_packet.assert_awaited_once_with(b"frame-1")
     assert not server.enabled

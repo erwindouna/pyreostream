@@ -7,11 +7,11 @@ from .exceptions import (
     PyReoStreamError,
     PyReoStreamTimeoutError,
 )
-from .mqtt import MotionPublisher
+from .mqtt import MQTTPublisher
 from .rtsp import RtspServer
 
 __all__ = [
-    "MotionPublisher",
+    "MQTTPublisher",
     "PyReoStreamAuthenticationError",
     "PyReoStreamConnectionError",
     "PyReoStreamError",

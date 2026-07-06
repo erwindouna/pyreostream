@@ -1,6 +1,7 @@
 {
   "name": "${containerWorkspaceFolderBasename}",
   "image": "mcr.microsoft.com/vscode/devcontainers/python:3.14",
+  "runArgs": ["--network=host"],
   "customizations": {
     "codespaces": {
       "openFiles": [

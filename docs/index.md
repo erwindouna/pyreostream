@@ -13,8 +13,8 @@ This is built in layers, each independently testable:
    H.264/H.265 frames; this project never encodes video itself.
 3. **RTSP/RTP server** ([`RtspServer`][pyreostream.rtsp.RtspServer]) — packetizes
    those frames for RTSP clients using GStreamer, started/stopped on demand.
-4. **MQTT motion publisher** ([`MotionPublisher`][pyreostream.mqtt.MotionPublisher]) —
-   publishes retained motion on/off events.
+4. **MQTT publisher** ([`MQTTPublisher`][pyreostream.mqtt.MQTTPublisher]) —
+   publishes retained messages, e.g. motion on/off events.
 
 See the [API reference](api.md) for details, and
 [`examples/example.py`](https://github.com/erwindouna/pyreostream/blob/main/examples/example.py)
